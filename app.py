@@ -6,12 +6,13 @@ from tempfile import TemporaryDirectory
 from zipfile import ZipFile
 from PIL import Image, ImageOps
 import io
+import time
 
 # === Streamlit UI ===
-st.title("📸 Image Downloader, Resizer & Zipper")
-st.write("Upload a CSV with image URLs and SKUs. Images will be resized to your dimensions with padding and saved as `.jpg`.")
+st.title("📸 Bulk Image Downloader, Resizer & Zipper")
+st.write("Upload a CSV with image URLs and SKUs. Images are resized to your dimensions with optional padding color and saved as `.jpg`.")
 
-# === File Upload ===
+# === Upload CSV ===
 uploaded_file = st.file_uploader("📄 Upload your CSV file", type=["csv"])
 
 if uploaded_file:
@@ -28,7 +29,7 @@ if uploaded_file:
     # === Background color ===
     bg_color = st.color_picker("🎨 Background color (used for padding)", "#FFFFFF")
 
-    if st.button("📥 Download & Resize Images"):
+    if st.button("📥 Start Download"):
         with TemporaryDirectory() as tmpdir:
             csv_path = os.path.join(tmpdir, "input.csv")
             with open(csv_path, "wb") as f:
@@ -37,34 +38,51 @@ if uploaded_file:
             image_dir = os.path.join(tmpdir, "images")
             os.makedirs(image_dir, exist_ok=True)
 
-            def download_resize_pad(url, sku, save_dir, size, bg_color_hex):
-                try:
-                    response = requests.get(url, timeout=10)
-                    response.raise_for_status()
-
-                    img = Image.open(io.BytesIO(response.content)).convert("RGB")
-
-                    # Resize with aspect ratio and pad with background color
-                    resized = ImageOps.pad(
-                        img,
-                        size=size,
-                        color=bg_color_hex,
-                        method=Image.LANCZOS
-                    )
-
-                    output_path = os.path.join(save_dir, f"{sku}.jpg")
-                    resized.save(output_path, format="JPEG", quality=90)
-                except:
-                    pass  # Silently skip bad URLs
-
-            # === Read CSV and process ===
+            # === Read CSV ===
             with open(csv_path, newline='', encoding='utf-8-sig') as csvfile:
-                reader = csv.DictReader(csvfile)
-                for row in reader:
+                reader = list(csv.DictReader(csvfile))
+                total = len(reader)
+                if total == 0:
+                    st.error("❌ CSV file is empty or incorrectly formatted.")
+                    st.stop()
+
+                # Progress indicators
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+
+                # Download & resize
+                start_time = time.time()
+
+                for idx, row in enumerate(reader, start=1):
                     url = row.get(image_column)
                     sku = row.get(sku_column)
                     if url and sku:
-                        download_resize_pad(url, sku, image_dir, (width, height), bg_color)
+                        try:
+                            response = requests.get(url, timeout=10)
+                            response.raise_for_status()
+                            img = Image.open(io.BytesIO(response.content)).convert("RGB")
+
+                            # Resize and pad
+                            resized = ImageOps.pad(
+                                img,
+                                size=(width, height),
+                                color=bg_color,
+                                method=Image.LANCZOS
+                            )
+
+                            # Save as .jpg
+                            output_path = os.path.join(image_dir, f"{sku}.jpg")
+                            resized.save(output_path, format="JPEG", quality=90)
+
+                        except Exception:
+                            pass  # silently skip
+
+                    # Update progress
+                    elapsed = time.time() - start_time
+                    avg_time = elapsed / idx
+                    remaining = avg_time * (total - idx)
+                    status_text.text(f"Processing {idx}/{total} | ⏳ Est. {int(remaining)}s left")
+                    progress_bar.progress(idx / total)
 
             # === Create ZIP ===
             zip_buffer = io.BytesIO()
