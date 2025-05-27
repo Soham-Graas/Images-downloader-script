@@ -1,39 +1,122 @@
+import streamlit as st
 import os
-import shutil
-import pandas as pd
+import csv
+import requests
+from tempfile import TemporaryDirectory
+from zipfile import ZipFile
+from PIL import Image, ImageOps
+import io
+import time
 
-# === CONFIGURATION ===
-source_folder = r"C:\Users\Soham Hardas\Downloads\pak"
-target_root_folder = r"C:\Users\Soham Hardas\Documents\Pakistan"
-csv_file = r"C:\Users\Soham Hardas\Documents\Pakistan\Pakistan Images.csv"
-image_column = 'base_image'  # Column in CSV with image names
-images_per_folder = 2000
-start_folder_index = 1
+# === Streamlit UI ===
+st.title("📸 Bulk Image Downloader, Resizer & Zipper")
+st.write("Upload a CSV with image URLs and SKUs. Images are resized to your dimensions with optional padding color and saved as `.jpg`.")
 
-# === LOAD IMAGE NAMES FROM CSV ===
-df = pd.read_csv(csv_file)
-image_names = df[image_column].dropna().astype(str).tolist()
+# === Upload CSV ===
+uploaded_file = st.file_uploader("📄 Upload your CSV file", type=["csv"])
 
-# === FILTER TO ONLY EXISTING FILES ===
-existing_images = [img for img in image_names if os.path.exists(os.path.join(source_folder, img))]
+if uploaded_file:
+    image_column = st.text_input("🔗 Column name for image URL", value="Image")
+    sku_column = st.text_input("🔑 Column name for SKU (used as filename)", value="sku")
 
-print(f"📦 Found {len(existing_images)} images to copy.")
+    # === Resize settings ===
+    col1, col2 = st.columns(2)
+    with col1:
+        width = st.number_input("📐 Width (px)", min_value=1, value=1200)
+    with col2:
+        height = st.number_input("📐 Height (px)", min_value=1, value=1200)
 
-# === SPLIT AND COPY IMAGES ===
-for i in range(0, len(existing_images), images_per_folder):
-    folder_number = start_folder_index + (i // images_per_folder)
-    new_folder_name = f'images{folder_number}'
-    new_folder_path = os.path.join(target_root_folder, new_folder_name)
+    # === Background color ===
+    bg_color = st.color_picker("🎨 Background color (used for padding)", "#FFFFFF")
 
-    os.makedirs(new_folder_path, exist_ok=True)
+    if st.button("📥 Start Download"):
+        with TemporaryDirectory() as tmpdir:
+            csv_path = os.path.join(tmpdir, "input.csv")
+            with open(csv_path, "wb") as f:
+                f.write(uploaded_file.read())
 
-    batch = existing_images[i:i + images_per_folder]
-    for img_name in batch:
-        src_path = os.path.join(source_folder, img_name)
-        dst_path = os.path.join(new_folder_path, img_name)
+            image_dir = os.path.join(tmpdir, "images")
+            os.makedirs(image_dir, exist_ok=True)
 
-        shutil.copy2(src_path, dst_path)
+            # === Read CSV ===
+            with open(csv_path, newline='', encoding='utf-8-sig') as csvfile:
+                reader = list(csv.DictReader(csvfile))
+                total = len(reader)
+                if total == 0:
+                    st.error("❌ CSV file is empty or incorrectly formatted.")
+                    st.stop()
 
-    print(f"✅ Copied {len(batch)} images to {new_folder_name}")
+                # Progress indicators
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                success_count = 0
+                failure_count = 0
 
-print("🎉 All available images have been successfully split and copied.")
+                # Download & resize
+                start_time = time.time()
+                headers = {'User-Agent': 'Mozilla/5.0'}
+
+                for idx, row in enumerate(reader, start=1):
+                    url = row.get(image_column)
+                    sku = row.get(sku_column)
+
+                    if not url or not sku:
+                        st.warning(f"⚠️ Missing URL or SKU at row {idx}")
+                        failure_count += 1
+                        continue
+
+                    try:
+                        response = requests.get(url, headers=headers, timeout=10)
+                        response.raise_for_status()
+
+                        content_type = response.headers.get("Content-Type", "")
+                        if 'image' not in content_type:
+                            raise ValueError(f"Invalid content type: {content_type}")
+
+                        img_data = io.BytesIO(response.content)
+
+                        # Validate image format
+                        Image.open(img_data).verify()
+                        img_data.seek(0)
+
+                        # Open and convert image
+                        img = Image.open(img_data).convert("RGB")
+
+                        # Resize and pad
+                        resized = ImageOps.pad(
+                            img,
+                            size=(width, height),
+                            color=bg_color,
+                            method=Image.LANCZOS
+                        )
+
+                        # Save as .jpg
+                        output_path = os.path.join(image_dir, f"{sku}.jpg")
+                        resized.save(output_path, format="JPEG", quality=90)
+                        success_count += 1
+
+                    except Exception as e:
+                        st.warning(f"⚠️ Failed SKU: {sku} | URL: {url} | Error: {e}")
+                        failure_count += 1
+
+                    # Update progress
+                    elapsed = time.time() - start_time
+                    avg_time = elapsed / idx
+                    remaining = avg_time * (total - idx)
+                    status_text.text(f"Processing {idx}/{total} | ✅ {success_count} | ❌ {failure_count} | ⏳ Est. {int(remaining)}s left")
+                    progress_bar.progress(idx / total)
+
+            # === Create ZIP ===
+            zip_buffer = io.BytesIO()
+            with ZipFile(zip_buffer, 'w') as zipf:
+                for root, _, files in os.walk(image_dir):
+                    for file in files:
+                        zipf.write(os.path.join(root, file), arcname=file)
+
+            st.success(f"🎉 Done! ✅ {success_count} images downloaded. ❌ {failure_count} failed.")
+            st.download_button(
+                label="📦 Download ZIP of Images",
+                data=zip_buffer.getvalue(),
+                file_name="resized_images.zip",
+                mime="application/zip"
+            )
