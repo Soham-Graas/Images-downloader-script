@@ -7,6 +7,16 @@ from zipfile import ZipFile
 from PIL import Image, ImageOps
 import io
 import time
+import re
+
+# === Helper: Convert Google Drive link to direct download ===
+def get_direct_gdrive_url(url):
+    if "drive.google.com" in url:
+        match = re.search(r'd/([a-zA-Z0-9_-]+)', url)
+        if match:
+            file_id = match.group(1)
+            return f'https://drive.google.com/uc?export=download&id={file_id}'
+    return url
 
 # === Streamlit UI ===
 st.title("📸 Bulk Image Downloader, Resizer & Zipper")
@@ -49,61 +59,40 @@ if uploaded_file:
                 # Progress indicators
                 progress_bar = st.progress(0)
                 status_text = st.empty()
-                success_count = 0
-                failure_count = 0
 
                 # Download & resize
                 start_time = time.time()
-                headers = {'User-Agent': 'Mozilla/5.0', 'Referer': 'https://www.se.com/'}
 
                 for idx, row in enumerate(reader, start=1):
                     url = row.get(image_column)
                     sku = row.get(sku_column)
+                    if url and sku:
+                        try:
+                            direct_url = get_direct_gdrive_url(url)
+                            response = requests.get(direct_url, timeout=15)
+                            response.raise_for_status()
+                            img = Image.open(io.BytesIO(response.content)).convert("RGB")
 
-                    if not url or not sku:
-                        st.warning(f"⚠️ Missing URL or SKU at row {idx}")
-                        failure_count += 1
-                        continue
+                            # Resize and pad
+                            resized = ImageOps.pad(
+                                img,
+                                size=(width, height),
+                                color=bg_color,
+                                method=Image.LANCZOS
+                            )
 
-                    try:
-                        response = requests.get(url, headers=headers, timeout=10)
-                        response.raise_for_status()
+                            # Save as .jpg
+                            output_path = os.path.join(image_dir, f"{sku}.jpg")
+                            resized.save(output_path, format="JPEG", quality=90)
 
-                        content_type = response.headers.get("Content-Type", "")
-                        if 'image' not in content_type:
-                            raise ValueError(f"Invalid content type: {content_type}")
-
-                        img_data = io.BytesIO(response.content)
-
-                        # Validate image format
-                        Image.open(img_data).verify()
-                        img_data.seek(0)
-
-                        # Open and convert image
-                        img = Image.open(img_data).convert("RGB")
-
-                        # Resize and pad
-                        resized = ImageOps.pad(
-                            img,
-                            size=(width, height),
-                            color=bg_color,
-                            method=Image.LANCZOS
-                        )
-
-                        # Save as .jpg
-                        output_path = os.path.join(image_dir, f"{sku}.jpg")
-                        resized.save(output_path, format="JPEG", quality=90)
-                        success_count += 1
-
-                    except Exception as e:
-                        st.warning(f"⚠️ Failed SKU: {sku} | URL: {url} | Error: {e}")
-                        failure_count += 1
+                        except Exception as e:
+                            st.warning(f"⚠️ Failed to process {sku}: {e}")
 
                     # Update progress
                     elapsed = time.time() - start_time
                     avg_time = elapsed / idx
                     remaining = avg_time * (total - idx)
-                    status_text.text(f"Processing {idx}/{total} | ✅ {success_count} | ❌ {failure_count} | ⏳ Est. {int(remaining)}s left")
+                    status_text.text(f"Processing {idx}/{total} | ⏳ Est. {int(remaining)}s left")
                     progress_bar.progress(idx / total)
 
             # === Create ZIP ===
@@ -113,7 +102,7 @@ if uploaded_file:
                     for file in files:
                         zipf.write(os.path.join(root, file), arcname=file)
 
-            st.success(f"🎉 Done! ✅ {success_count} images downloaded. ❌ {failure_count} failed.")
+            st.success("🎉 All images processed and zipped!")
             st.download_button(
                 label="📦 Download ZIP of Images",
                 data=zip_buffer.getvalue(),
